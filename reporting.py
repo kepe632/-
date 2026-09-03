@@ -253,6 +253,38 @@ def expert_section(buckets):
         lines.append("")
     return lines
 
+
+
+def plot_sector_bar(sectors, out_png):
+    """行业板块涨跌幅横向条形图，保存为 PNG。sectors=[{name,pct},...]。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun"]
+    plt.rcParams["axes.unicode_minus"] = False
+    names = [s.get("base") or s.get("name") for s in sectors]
+    vals = [(s.get("pct") or 0) for s in sectors]
+    n = len(names)
+    fig, ax = plt.subplots(figsize=(8, max(3.2, n * 0.5)))
+    y = list(range(n))[::-1]
+    ax.barh(y, vals, color="#1F3864")
+    ax.set_yticks(y)
+    ax.set_yticklabels(names, fontsize=9)
+    ax.set_xlabel("涨跌幅 %")
+    ax.set_title("热点行业板块涨跌幅（东方财富）", fontsize=12, fontweight="bold")
+    for yi, v in zip(y, vals):
+        off = 0.06 * (1 if v >= 0 else -1)
+        ax.text(v + off, yi, f"{v:+.2f}%", va="center", ha=("left" if v >= 0 else "right"), fontsize=9)
+    ax.axvline(0, color="#000000", lw=0.8)
+    lo = min(vals) - 1 if min(vals) < 0 else -0.5
+    hi = max(vals) + 1 if max(vals) > 0 else 0.5
+    ax.set_xlim(left=lo, right=hi)
+    fig.tight_layout()
+    fig.savefig(str(out_png), dpi=130, bbox_inches="tight", format="png")
+    plt.close(fig)
+    return out_png
+
 def morning_report(date: dt.date):
     folder = dated_dir(REPORTS_ROOT, date)
     cn = fetch_indices([c for _, c in INDEX_CN])

@@ -233,6 +233,16 @@ def build_docx(md_text, path, title):
             _add_heading(doc, ln[3:].strip(), 1)
         elif ln.startswith("### "):
             _add_heading(doc, ln[4:].strip(), 2)
+        elif ln.startswith("![") and "](" in ln:
+            inner = ln[2:]
+            img_path = inner.split("](", 1)[1].rstrip(")").strip()
+            try:
+                from io import BytesIO
+                with open(img_path, "rb") as fh:
+                    doc.add_picture(BytesIO(fh.read()), width=Cm(16))
+                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                doc.add_paragraph(inner)
         elif ln.startswith("|") and "|" in ln:
             rows = []
             while i < len(lines) and lines[i].strip().startswith("|"):

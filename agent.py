@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 from pathlib import Path
 import reporting
 
@@ -141,17 +142,36 @@ def fetch_fund_flow(code: str):
         return None, None
 
 
-def fetch_em_boards(topn: int = 3) -> list[dict]:
-    """东方财富行业板块强度 TopN（push2delay clist，本机实测可达）。"""
+_ROMAN_END = re.compile(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩVIX]+$")
+
+
+def _dedupe_boards(boards):
+    seen = {}
+    for b in boards:
+        name = b.get("name") or ""
+        base = _ROMAN_END.sub("", name).strip() or name
+        b = dict(b)
+        b["base"] = base
+        if base not in seen or (b.get("pct") or 0) > (seen[base].get("pct") or 0):
+            seen[base] = b
+    out = sorted(seen.values(), key=lambda x: x.get("pct") or -9999, reverse=True)
+    for i, b in enumerate(out):
+        b["rank"] = i + 1
+    return out
+
+
+def fetch_em_boards(topn: int = 10) -> list[dict]:
+    """东方财富行业板块强度 TopN（push2delay clist，已去重父子级，本机实测可达）。"""
     url = ("https://push2delay.eastmoney.com/api/qt/clist/get"
-           "?pn=1&pz=8&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14,f2,f3")
+           "?pn=1&pz=50&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14,f2,f3")
     try:
         d = json.loads(_curl_em(url))
         diff = (d.get("data") or {}).get("diff") or []
-        out = [{"name": it.get("f14"), "pct": it.get("f3")} for it in diff]
-        return out[:topn]
+        boards = [{"name": it.get("f14"), "pct": it.get("f3")} for it in diff]
+        return _dedupe_boards(boards)[:topn]
     except Exception:
         return []
+
 
 def augment_rows(rows: list) -> None:
     """给每日雷达的行补 52周极值 + 核心财务（原地修改）。"""
@@ -297,7 +317,7 @@ def fetch_sectors(demo: bool = False) -> list[dict]:
     if demo:
         return demo_sectors()
     try:
-        em = fetch_em_boards(3)
+        em = fetch_em_boards(10)
         if em:
             print("[info] 板块数据源：东方财富(push2delay 行业板块)。")
             return em
@@ -319,7 +339,7 @@ def fetch_sectors(demo: bool = False) -> list[dict]:
         items.sort(key=lambda x: x[1], reverse=True)
         if items:
             print("[info] 板块数据源：腾讯 ETF 代理。")
-            return [{"name": n, "pct": p} for n, p in items[:3]]
+            return [{"name": n, "pct": p} for n, p in items[:10]]
     except Exception as e:
         print(f"[warn] 板块 ETF 代理也失败({e})。")
     print("[warn] 板块全部失败，回退内置样例。")
@@ -522,13 +542,23 @@ def biweekly_memo(rows: list[dict], date_str: str) -> str:
 
 
 def weekly_review(date_str: str) -> str:
+    date = dt.date.fromisoformat(date_str) if date_str else dt.date.today()
     sectors = fetch_sectors(demo=demo_flag if "demo_flag" in globals() else False)
-    rows = "\n".join(f"- **{s['name']}**：{fmt(s['pct'], '%')}" for s in sectors)
+    top = sectors[:10]
+    rows = "\n".join(f"- **{s.get('base') or s.get('name')}**：{fmt(s.get('pct'), '%')}" for s in top)
     watch = "、".join(f"{s['name']}({s['code']})" for s in WATCHLIST)
-    top3 = "、".join(f"{s['name']}({fmt(s['pct'], '%')})" for s in sectors)
+    top_str = "、".join(f"{s.get('base') or s.get('name')}({fmt(s.get('pct'), '%')})" for s in top)
     lines = [f"# 本周A股热点板块归因复盘（{date_str}）", "",
-             "> 数据口径：东方财富行业板块当日涨跌幅（push2delay 延时行情，东财源优先；东财接口不可达时回退腾讯板块 ETF 代理）。", "",
-             "## 本周 Top3 强势板块", rows, "", "## 核心驱动归因"]
+             "> 数据口径：东方财富行业板块当日涨跌幅（push2delay 延时行情，东财源优先；不可达时回退腾讯板块 ETF 代理）。", "",
+             f"## 本周 Top{len(top)} 强势板块", rows, ""]
+    try:
+        folder = reporting.dated_dir(REPORT_DIR, date)
+        chart = folder / "sector_bar.png"
+        reporting.plot_sector_bar(top, chart)
+        lines += ["### 板块涨跌幅一览", "", f"![Top{len(top)} 板块涨跌幅]({chart})", ""]
+    except Exception as e:
+        print(f"[warn] 板块图表生成失败({e})")
+    lines += ["## 核心驱动归因"]
     lines.append("需区分「政策主题炒作 / 基本面拐点估值修复 / 资金避险」。若涨幅高但成交未同步放大，多为资金行为；"
                  "若伴随业绩/订单落地，则偏向基本面修复。")
     lines.append("")
@@ -539,8 +569,8 @@ def weekly_review(date_str: str) -> str:
     lines.append("关注美联储议息、国内经济数据（PMI/社融/CPI）与产业政策（大基金/以旧换新/集采调整）。")
     lines.append("")
     prompt = ('你是首席投资舆情分析师兼资深基金经理。基于下列【给定事实】做定性研判：\n'
-              '本周 Top3 强势板块：' + top3 + '\n观察池（10 只）：' + watch + '\n'
-              '请用概率思维给出：1) 这三个板块走强最可能的主因与持续性；2) 对观察池科技股的联动或抽血判断；'
+              '本周 Top' + str(len(top)) + ' 强势板块：' + top_str + '\n观察池（10 只）：' + watch + '\n'
+              '请用概率思维给出：1) 这些板块走强最可能的主因与持续性；2) 对观察池科技股的联动或抽血判断；'
               '3) 下周对观察池影响最大的系统性风险与机会。'
               '严格只基于给定事实与产业常识推理，禁止编造任何数字、日期、来源、个股涨跌幅或不在给定列表中的公司；'
               '不确定就写“需验证”。禁止绝对化。')
