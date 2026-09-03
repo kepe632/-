@@ -176,7 +176,7 @@ def _llm_key():
         return k
     env = Path(__file__).resolve().parent / ".env"
     if env.exists():
-        for line in env.read_text(encoding="utf-8").splitlines():
+        for line in env.read_text(encoding="utf-8-sig").splitlines():
             line = line.strip()
             if line.startswith("DEEPSEEK_API_KEY="):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
