@@ -194,7 +194,7 @@ def _llm(prompt):
                           headers={"Authorization": f"Bearer {key}"},
                           json={"model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
                                 "messages": [{"role": "user", "content": prompt}],
-                                "temperature": 0.3, "max_tokens": 2000}, timeout=120)
+                                "temperature": 0.3, "max_tokens": 4096}, timeout=120)
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
     except Exception:
@@ -226,7 +226,7 @@ def _why(text):
 def expert_section(buckets):
     picked = []
     for kind in ["国际市场", "中国市场", "行业产业", "个股/公司公告", "市场要闻"]:
-        for it in buckets.get(kind, [])[:4]:
+        for it in buckets.get(kind, [])[:3]:
             picked.append((kind, it))
     if not picked:
         return []
