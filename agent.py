@@ -120,11 +120,45 @@ def fetch_fundamentals(code: str):
         return None
 
 
+
+
+def fetch_fund_flow(code: str):
+    """东财 push2delay 个股当日主力资金：返回 (主力净流入元, 主力净占比%)。"""
+    secid = _em_secid(code)
+    url = (f"https://push2delay.eastmoney.com/api/qt/stock/fflow/daykline/get"
+           f"?lmt=1&klt=101&secid={secid}&fields1=f1,f2,f3,f7"
+           f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63")
+    try:
+        d = json.loads(_curl_em(url))
+        kl = (d.get("data") or {}).get("klines") or []
+        if not kl:
+            return None, None
+        parts = kl[-1].split(",")
+        net = float(parts[1]) if parts[1] not in ("", "-") else None   # f52 主力净流入(元)
+        pct = float(parts[6]) if parts[6] not in ("", "-") else None   # f57 主力净占比%
+        return net, pct
+    except Exception:
+        return None, None
+
+
+def fetch_em_boards(topn: int = 3) -> list[dict]:
+    """东方财富行业板块强度 TopN（push2delay clist，本机实测可达）。"""
+    url = ("https://push2delay.eastmoney.com/api/qt/clist/get"
+           "?pn=1&pz=8&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2+f:!50&fields=f12,f14,f2,f3")
+    try:
+        d = json.loads(_curl_em(url))
+        diff = (d.get("data") or {}).get("diff") or []
+        out = [{"name": it.get("f14"), "pct": it.get("f3")} for it in diff]
+        return out[:topn]
+    except Exception:
+        return []
+
 def augment_rows(rows: list) -> None:
     """给每日雷达的行补 52周极值 + 核心财务（原地修改）。"""
     for r in rows:
         r["high52"], r["low52"] = fetch_52w(r["code"])
         r["fund"] = fetch_fundamentals(r["code"])
+        r["main_net"], r["main_pct"] = fetch_fund_flow(r["code"])
 
 
 
@@ -259,16 +293,24 @@ SECTOR_ETFS = [
 
 
 def fetch_sectors(demo: bool = False) -> list[dict]:
-    """行业板块强度 Top3：优先东财行业接口，兜底用腾讯板块 ETF 当日涨跌代理。"""
+    """行业板块强度 Top3：东方财富 push2delay 优先，次选 akshare 东财，再腾讯 ETF 代理。"""
     if demo:
         return demo_sectors()
+    try:
+        em = fetch_em_boards(3)
+        if em:
+            print("[info] 板块数据源：东方财富(push2delay 行业板块)。")
+            return em
+        print("[warn] 东财 push2delay 板块为空。")
+    except Exception as e:
+        print(f"[warn] 东财 push2delay 板块失败({e})。")
     try:
         ak = _ak()
         df = ak.stock_board_industry_name_em()
         top = df.sort_values("涨跌幅", ascending=False).head(3)
         return [{"name": r["板块名称"], "pct": r["涨跌幅"]} for _, r in top.iterrows()]
     except Exception as e:
-        print(f"[warn] 东财板块取数失败({e})，改用腾讯板块 ETF 代理。")
+        print(f"[warn] akshare 东财板块取数失败({e})。")
     try:
         import reporting
         data = reporting.fetch_indices([c for _, c in SECTOR_ETFS])
@@ -276,6 +318,7 @@ def fetch_sectors(demo: bool = False) -> list[dict]:
         items = [x for x in items if x[1] is not None]
         items.sort(key=lambda x: x[1], reverse=True)
         if items:
+            print("[info] 板块数据源：腾讯 ETF 代理。")
             return [{"name": n, "pct": p} for n, p in items[:3]]
     except Exception as e:
         print(f"[warn] 板块 ETF 代理也失败({e})。")
@@ -404,8 +447,8 @@ def daily_radar(rows: list[dict], date_str: str) -> str:
                      f"量比 {fmt(r['volume_ratio'], '', 1)}（vs 近5日均量），换手 {fmt(r['turnover'], '%')}，"
                      f"振幅 {fmt(amp, '%')}；今开 {fmt(r.get('open'))}，高/低 {fmt(r.get('high'))}/{fmt(r.get('low'))}；"
                      f"成交量 {vol_s}，成交额 {amt_s}。")
-        lines.append(f"- **资金面**：主力净流入 {fmt(r.get('main_net'), '亿')}（占比 {fmt(r.get('main_pct'), '%')}）；"
-                     f"腾讯源暂不提供主力资金，akshare 可用时补齐。")
+        lines.append(f"- **资金面**：主力净流入 {_fnum(r.get('main_net'))}（净占比 {_pct(r.get('main_pct'))}）；"
+                     f"北向逐日净流向 2024-08 起停发，东财主力资金为参考。")
         lines.append(f"- **估值与位置**：动态 PE {fmt(r['pe'])}，PB {fmt(r['pb'])}，"
                      f"总市值 {fmt(r['mktcap'], '亿')}（流通 {fmt(r.get('circ_mktcap'), '亿')}）；{_pos(r)}。")
         fund = r.get("fund")
@@ -484,7 +527,7 @@ def weekly_review(date_str: str) -> str:
     watch = "、".join(f"{s['name']}({s['code']})" for s in WATCHLIST)
     top3 = "、".join(f"{s['name']}({fmt(s['pct'], '%')})" for s in sectors)
     lines = [f"# 本周A股热点板块归因复盘（{date_str}）", "",
-             "> 数据口径：以所跟踪板块 ETF 当日涨跌代理板块强度（东财行业接口可达时优先）。", "",
+             "> 数据口径：东方财富行业板块当日涨跌幅（push2delay 延时行情，东财源优先；东财接口不可达时回退腾讯板块 ETF 代理）。", "",
              "## 本周 Top3 强势板块", rows, "", "## 核心驱动归因"]
     lines.append("需区分「政策主题炒作 / 基本面拐点估值修复 / 资金避险」。若涨幅高但成交未同步放大，多为资金行为；"
                  "若伴随业绩/订单落地，则偏向基本面修复。")
