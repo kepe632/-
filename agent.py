@@ -8,7 +8,7 @@
   python agent.py weekly                 # 周五板块归因复盘（每周五 16:00 跑）
   python agent.py daily --demo           # 离线样例模式（无网络/未装 akshare 也能跑通）
 
-数据层: akshare(东财/交易所公开接口)  记忆层: 本地 data/*.json(逐日雷达，供双周召回)
+数据层: akshare(东财) 优先 + 腾讯行情 qt.gtimg.cn 兜底(--noproxy 直连)  记忆层: 本地 data/*.json(逐日雷达，供双周召回)
 LLM: 可选 DeepSeek(OpenAI 兼容)，未配 DEEPSEEK_API_KEY 时输出数据驱动模板。
 """
 
@@ -53,50 +53,90 @@ def _board(code: str) -> str:
     return "sz"
 
 
+def fetch_quotes_tencent() -> list[dict]:
+    """腾讯行情 qt.gtimg.cn 兜底取数(--noproxy 直连,本机实测可用)。按 ~ 分隔。"""
+    import subprocess
+    codes = [_board(s["code"]) + s["code"] for s in WATCHLIST]
+    url = "https://qt.gtimg.cn/q=" + ",".join(codes)
+    proc = subprocess.run(["curl.exe", "--noproxy", "*", "-s", "--max-time", "15", url], capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or b"").decode("gbk", "ignore") or "tencent fetch failed")
+    text = proc.stdout.decode("gbk", "ignore")
+    rows = []
+    for line in text.splitlines():
+        if "=" not in line or "~" not in line or '="' not in line:
+            continue
+        parts = line.split('="', 1)[1].strip('"').split("~")
+        if len(parts) < 47:
+            continue
+        rows.append({
+            "code": parts[2],
+            "name": parts[1],
+            "price": _num(parts[3]),
+            "pct": _num(parts[32]),
+            "volume_ratio": None,  # 腾讯单钟界面无数</br>量比,标记 N/A
+            "turnover": _num(parts[38]),
+            "pe": _num(parts[39]),
+            "pb": _num(parts[46]),
+            "mktcap": _num(parts[45]),
+            "main_net": None,
+            "main_pct": None,
+            "news": fetch_news(parts[2]),
+        })
+    if not rows:
+        raise RuntimeError("tencent returned no rows")
+    return rows
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_quotes_akshare() -> list[dict]:
+    """akshare(东财) 行情;失败时留给外层回退到腾讯。"""
+    ak = _ak()
+    spot = ak.stock_zh_a_spot_em()
+    rows = []
+    for s in WATCHLIST:
+        hit = spot[spot["代码"] == s["code"]]
+        if hit.empty:
+            continue
+        r = hit.iloc[0].to_dict()
+        flow = {}
+        try:
+            ff = ak.stock_individual_fund_flow(stock=s["code"], market=_board(s["code"]))
+            if not ff.empty:
+                last = ff.iloc[-1].to_dict()
+                flow = {"main_net": last.get("主力净流入-净额"), "main_pct": last.get("主力净流入-净占比")}
+        except Exception:
+            flow = {}
+        rows.append({
+            "code": s["code"], "name": s["name"], "price": r.get("最新价"), "pct": r.get("涨跌幅"),
+            "volume_ratio": r.get("量比"), "turnover": r.get("换手率"), "pe": r.get("市盈率-动态"),
+            "pb": r.get("市净率"), "mktcap": r.get("总市值"), "main_net": flow.get("main_net"),
+            "main_pct": flow.get("main_pct"), "news": fetch_news(s["code"]),
+        })
+    if not rows:
+        raise RuntimeError("akshare returns no rows")
+    return rows
+
+
 def fetch_quotes(demo: bool = False) -> list[dict]:
-    """行情 + 主力资金。北向逐日净流向 2024-08 后不再实时披露，以主力资金为代理。"""
+    """行情+主力资金。北向逐日净流向 2024-08 后不再实时披露,以主力资金为代理。"""
     if demo:
         return demo_quotes()
-    try:
-        ak = _ak()
-        spot = ak.stock_zh_a_spot_em()
-        rows = []
-        for s in WATCHLIST:
-            hit = spot[spot["代码"] == s["code"]]
-            if hit.empty:
-                continue
-            r = hit.iloc[0].to_dict()
-            flow = {}
-            try:
-                ff = ak.stock_individual_fund_flow(stock=s["code"], market=_board(s["code"]))
-                if not ff.empty:
-                    last = ff.iloc[-1].to_dict()
-                    flow = {
-                        "main_net": last.get("主力净流入-净额"),
-                        "main_pct": last.get("主力净流入-净占比"),
-                    }
-            except Exception:
-                flow = {}
-            rows.append(
-                {
-                    "code": s["code"],
-                    "name": s["name"],
-                    "price": r.get("最新价"),
-                    "pct": r.get("涨跌幅"),
-                    "volume_ratio": r.get("量比"),  # 量比≈当日量 vs 近5日均量
-                    "turnover": r.get("换手率"),
-                    "pe": r.get("市盈率-动态"),
-                    "pb": r.get("市净率"),
-                    "mktcap": r.get("总市值"),
-                    "main_net": flow.get("main_net"),
-                    "main_pct": flow.get("main_pct"),
-                    "news": fetch_news(s["code"]),
-                }
-            )
-        return rows
-    except Exception as e:  # 取数失败降级为样例，保证脚本可跑
-        print(f"[warn] 实时行情取数失败({e})，回退内置样例。")
-        return demo_quotes()
+    for label, fetcher in (("akshare", fetch_quotes_akshare), ("腾讯", fetch_quotes_tencent)):
+        try:
+            rows = fetcher()
+            if rows:
+                return rows
+        except Exception as e:
+            print(f"[warn] {label} 行情取数失败({e})")
+    print("[warn] 全部行情源失败，回退内置样例。")
+    return demo_quotes()
 
 
 def fetch_news(code: str, limit: int = 6) -> list[dict]:
