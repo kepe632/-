@@ -1,6 +1,7 @@
 ﻿#!/usr/bin/env python3
 """报告输出增强：按日期+星期建文件夹、Word(docx) 导出、每日早间市场与行业要闻。"""
 from __future__ import annotations
+import os
 
 import datetime as dt
 import re
@@ -159,6 +160,99 @@ def md_to_docx(md_text, path, title):
 
 
 # ------------------------------ 早间报告 ------------------------------ #
+
+# ------------------------------ 投资专家解读 ------------------------------ #
+_WATCH = {"300308":"中际旭创","300502":"新易盛","688041":"海光信息","688256":"寒武纪","688981":"中芯国际","002475":"立讯精密","601138":"工业富联","601689":"拓普集团","002747":"埃斯顿","300124":"汇川技术"}
+_DOMAINS = [
+    ("光模块/AI 算力", ["光模块","光通信","CPO","800G","光芯片","算力","AI 服务器","数据中心","英伟达"], ["中际旭创","新易盛","工业富联"]),
+    ("国产算力/半导体", ["芯片","半导体","国产替代","GPU","CPU","存储","晶圆","光刻","设备","AI 芯片"], ["海光信息","寒武纪","中芯国际"]),
+    ("机器人/工控", ["机器人","人形","执行器","减速器","伺服","工控","自动化"], ["拓普集团","埃斯顿","汇川技术"]),
+    ("消费电子/AI 硬件", ["消费电子","AI 终端","可穿戴","果链","供应链"], ["立讯精密","工业富联"]),
+]
+
+def _llm_key():
+    k = os.environ.get("DEEPSEEK_API_KEY")
+    if k:
+        return k
+    env = Path(__file__).resolve().parent / ".env"
+    if env.exists():
+        for line in env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("DEEPSEEK_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def _llm(prompt):
+    key = _llm_key()
+    if not key:
+        return None
+    import requests
+    base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+    try:
+        r = requests.post(f"{base}/chat/completions",
+                          headers={"Authorization": f"Bearer {key}"},
+                          json={"model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+                                "messages": [{"role": "user", "content": prompt}],
+                                "temperature": 0.3, "max_tokens": 2000}, timeout=120)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return None
+
+
+def _beneficiaries(text):
+    names, seen = [], set()
+    for domain, kws, stocks in _DOMAINS:
+        if any(k in text for k in kws):
+            for st in stocks:
+                if st not in seen:
+                    seen.add(st); names.append(st)
+    return names
+
+
+def _why(text):
+    for scope, kws, comment in [
+        ("政策面", ["政策","会议","监管","证监会","发改委","国务院","降准","降息","补贴","规划","专项债"], "政策定调易对板块形成趋势性影响，短中期估值中枢可能上移。"),
+        ("海外映射", ["美股","美联储","英伟达","特斯拉","纳指","道指","标普","加息"], "海外龙头与利率扰动是 A 股科技链的外部定价锚，情绪与估值联动明显。"),
+        ("产业景气", ["订单","需求","出货","景气","涨价","扩产","产能","招标","中标"], "产业景气信号直接关系到相关公司业绩兑现节奏。"),
+        ("公司事件", ["回购","增持","减持","中标","公告","质押","问询","业绩"], "公司层面事件决定短期资金与情绪方向。"),
+    ]:
+        if any(k in text for k in kws):
+            return comment
+    return "该消息对板块影响需结合量价与资金面进一步确认。"
+
+
+def expert_section(buckets):
+    picked = []
+    for kind in ["国际市场", "中国市场", "行业产业", "个股/公司公告", "市场要闻"]:
+        for it in buckets.get(kind, [])[:4]:
+            picked.append((kind, it))
+    if not picked:
+        return []
+    lines = ["## 四、投资专家解读", ""]
+    if _llm_key():
+        prompt = ("你是首席投资舆情分析师兼资深基金经理。对下列今日重要财经新闻逐条给出三段式解读："
+                  "「这是什么」(一句话事实)、「为什么重要」(短中长期影响)、「机遇在哪里」(结合观察池个股说明受益方向与逻辑)。"
+                  "用概率思维与假如句式，禁止绝对化。新闻：\n" +
+                  "\n".join(f"- [{k}] {it['title']}（{(it.get('summary') or '')[:120]}）" for k, it in picked) +
+                  "\n观察池：" + "、".join(_WATCH.values()))
+        out = _llm(prompt)
+        if out:
+            return lines + [out]
+    for kind, it in picked:
+        text = it["title"] + " " + (it.get("summary") or "")
+        lines.append(f"### 【{kind}】{it['title']}")
+        lines.append(f"- **这是什么**：{it['title']}")
+        lines.append(f"- **为什么重要**：{_why(text)}")
+        names = _beneficiaries(text)
+        if names:
+            lines.append(f"- **机遇在哪里（观察池）**：{'、'.join(names)} 或受益于该方向；假如产业逻辑兑现，估值修复概率或上升。")
+        else:
+            lines.append("- **机遇在哪里**：暂以跟踪为主，需结合量价与后续公告验证。")
+        lines.append("")
+    return lines
+
 def morning_report(date: dt.date):
     folder = dated_dir(REPORTS_ROOT, date)
     cn = fetch_indices([c for _, c in INDEX_CN])
@@ -189,6 +283,7 @@ def morning_report(date: dt.date):
             if it.get("url"):
                 md.append(f"  - 来源：{it['url']}")
         md.append("")
+    md += expert_section(buckets)
     md += ["---", "", DISCLAIMER]
 
     text = "\n".join(md)
