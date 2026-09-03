@@ -35,6 +35,12 @@ DISCLAIMER: str = CONFIG["disclaimer"]
 # 数据层
 # --------------------------------------------------------------------------- #
 def _ak():
+    import pandas as pd  # 规避 akshare+pyarrow 在 pandas3.0 的 str.replace(\u) 报错
+    pd.options.mode.string_storage = "python"
+    try:
+        pd.options.future.infer_string = False
+    except Exception:
+        pass
     import akshare as ak  # 惰性导入，避免 demo 模式强依赖
     return ak
 
