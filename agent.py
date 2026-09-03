@@ -53,6 +53,80 @@ def _board(code: str) -> str:
         return "bj"
     return "sz"
 
+# ---- ai-berkshire 取数法：东方财富 (push2delay / datacenter)，curl --noproxy 直连 ----
+def _em_secid(code: str) -> str:
+    code = code.strip().replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
+    return f"1.{code}" if code.startswith(("6", "9", "5")) else f"0.{code}"
+
+
+def _em_market(code: str) -> str:
+    code = code.strip().replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
+    return "SH" if code.startswith(("6", "9", "5")) else "SZ"
+
+
+def _curl_em(url: str) -> str:
+    import subprocess
+    res = subprocess.run(
+        ["curl.exe", "--noproxy", "*", "-s",
+         "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+         "--max-time", "14", url], capture_output=True)
+    if res.returncode != 0 or not res.stdout.strip():
+        raise ConnectionError(f"em fetch failed: {url}")
+    try:
+        return res.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return res.stdout.decode("gbk")
+
+
+def fetch_52w(code: str):
+    """52周最高/最低 (f174/f175)。ai-berkshire 主用 push2delay，失败回退 push2。"""
+    for host in ("push2delay.eastmoney.com", "push2.eastmoney.com"):
+        try:
+            url = f"https://{host}/api/qt/stock/get?secid={_em_secid(code)}&fields=f174,f175&invt=2&fltt=2"
+            d = json.loads(_curl_em(url)).get("data") or {}
+            h, l = d.get("f174"), d.get("f175")
+            if h not in (None, "-") and l not in (None, "-"):
+                return h, l
+        except Exception:
+            continue
+    return None, None
+
+
+def fetch_fundamentals(code: str):
+    """东方财富 datacenter 核心财务(近4期年报)：营收/净利+增速/ROE/毛利率/EPS/BPS。"""
+    from urllib.parse import urlencode
+    clean = code.strip().replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
+    market = _em_market(code)
+    base = "https://datacenter.eastmoney.com/securities/api/data/get"
+    params = {"type": "RPT_F10_FINANCE_MAINFINADATA", "sty": "ALL",
+              "filter": f'(SECUCODE="{clean}.{market}")(REPORT_TYPE="年报")',
+              "p": "1", "ps": "4", "sr": "-1", "st": "REPORT_DATE", "source": "HSF10", "client": "PC"}
+    try:
+        d = json.loads(_curl_em(base + "?" + urlencode(params)))
+        rows = d.get("result", {}).get("data", [])
+        if not rows:
+            params["filter"] = f'(SECUCODE="{clean}.{market}")'
+            d = json.loads(_curl_em(base + "?" + urlencode(params)))
+            rows = d.get("result", {}).get("data", [])
+        if not rows:
+            return None
+        r = rows[0]
+        return {"report_date": str(r.get("REPORT_DATE") or "")[:10],
+                "revenue": r.get("TOTALOPERATEREVE"), "net_profit": r.get("PARENTNETPROFIT"),
+                "rev_growth": r.get("TOTALOPERATEREVETZ"), "profit_growth": r.get("PARENTNETPROFITTZ"),
+                "roe": r.get("ROEJQ"), "gross_margin": r.get("XSMLL"),
+                "eps": r.get("EPSJB"), "bps": r.get("BPS")}
+    except Exception:
+        return None
+
+
+def augment_rows(rows: list) -> None:
+    """给每日雷达的行补 52周极值 + 核心财务（原地修改）。"""
+    for r in rows:
+        r["high52"], r["low52"] = fetch_52w(r["code"])
+        r["fund"] = fetch_fundamentals(r["code"])
+
+
 
 def fetch_quotes_tencent() -> list[dict]:
     """腾讯行情 qt.gtimg.cn 兜底取数(--noproxy 直连,本机实测可用)。按 ~ 分隔。"""
@@ -68,18 +142,25 @@ def fetch_quotes_tencent() -> list[dict]:
         if "=" not in line or "~" not in line or '="' not in line:
             continue
         parts = line.split('="', 1)[1].strip('"').split("~")
-        if len(parts) < 47:
+        if len(parts) < 50:
             continue
         rows.append({
             "code": parts[2],
             "name": parts[1],
             "price": _num(parts[3]),
             "pct": _num(parts[32]),
-            "volume_ratio": None,  # 腾讯单钟界面无数</br>量比,标记 N/A
+            "open": _num(parts[5]),
+            "high": _num(parts[33]),
+            "low": _num(parts[34]),
+            "volume": _num(parts[36]),
+            "amount": _num(parts[37]),
+            "amplitude": _num(parts[43]),
+            "volume_ratio": _num(parts[49]),
             "turnover": _num(parts[38]),
             "pe": _num(parts[39]),
             "pb": _num(parts[46]),
             "mktcap": _num(parts[45]),
+            "circ_mktcap": _num(parts[44]),
             "main_net": None,
             "main_pct": None,
             "news": fetch_news(parts[2]),
@@ -170,20 +251,36 @@ def classify_news(title: str) -> str:
     return "行业/要闻"
 
 
+SECTOR_ETFS = [
+    ("半导体", "sh512480"), ("AI/算力", "sz159819"), ("机器人", "sz159770"),
+    ("新能源/光伏", "sh515790"), ("券商", "sh512000"), ("创新药", "sz159992"),
+    ("军工", "sh512660"), ("消费", "sh159928"), ("新能源车", "sz515030"), ("5G/通信", "sh515050"),
+]
+
+
 def fetch_sectors(demo: bool = False) -> list[dict]:
-    """行业板块涨跌幅，取 Top3。"""
+    """行业板块强度 Top3：优先东财行业接口，兜底用腾讯板块 ETF 当日涨跌代理。"""
     if demo:
         return demo_sectors()
     try:
         ak = _ak()
         df = ak.stock_board_industry_name_em()
         top = df.sort_values("涨跌幅", ascending=False).head(3)
-        return [
-            {"name": r["板块名称"], "pct": r["涨跌幅"]} for _, r in top.iterrows()
-        ]
+        return [{"name": r["板块名称"], "pct": r["涨跌幅"]} for _, r in top.iterrows()]
     except Exception as e:
-        print(f"[warn] 板块取数失败({e})，回退内置样例。")
-        return demo_sectors()
+        print(f"[warn] 东财板块取数失败({e})，改用腾讯板块 ETF 代理。")
+    try:
+        import reporting
+        data = reporting.fetch_indices([c for _, c in SECTOR_ETFS])
+        items = [(n, data.get(c, {}).get("pct")) for n, c in SECTOR_ETFS]
+        items = [x for x in items if x[1] is not None]
+        items.sort(key=lambda x: x[1], reverse=True)
+        if items:
+            return [{"name": n, "pct": p} for n, p in items[:3]]
+    except Exception as e:
+        print(f"[warn] 板块 ETF 代理也失败({e})。")
+    print("[warn] 板块全部失败，回退内置样例。")
+    return demo_sectors()
 
 
 def northbound_note() -> str:
@@ -193,8 +290,19 @@ def northbound_note() -> str:
 # --------------------------------------------------------------------------- #
 # LLM（可选增强）
 # --------------------------------------------------------------------------- #
+
+
+def _dotenv_key() -> str | None:
+    env = ROOT / ".env"
+    if env.exists():
+        for line in env.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if line.startswith("DEEPSEEK_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return None
+
 def llm(prompt: str) -> str | None:
-    key = os.environ.get("DEEPSEEK_API_KEY")
+    key = os.environ.get("DEEPSEEK_API_KEY") or _dotenv_key()
     if not key:
         return None
     import requests
@@ -243,15 +351,71 @@ def fmt(v, unit="", nd=2):
     return str(v)
 
 
+def _fnum(v):
+    """数字转 亿/万 展示。"""
+    if v is None or v == "-":
+        return "N/A"
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if abs(v) >= 1e8:
+        return f"{v/1e8:.2f}亿"
+    if abs(v) >= 1e4:
+        return f"{v/1e4:.2f}万"
+    return f"{v:.2f}"
+
+
+def _pct(v):
+    if v is None or v == "-":
+        return "N/A"
+    try:
+        return f"{float(v):.2f}%"
+    except (TypeError, ValueError):
+        return str(v)
+
+
 def daily_radar(rows: list[dict], date_str: str) -> str:
-    lines = [f"# 每日舆情雷达（{date_str}）", ""]
-    lines.append(f"> {northbound_note()}")
+    up = [r for r in rows if (r.get("pct") or 0) > 0]
+    down = [r for r in rows if (r.get("pct") or 0) < 0]
+    avg = sum((r.get("pct") or 0) for r in rows) / len(rows) if rows else 0
+    best = max(rows, key=lambda r: r.get("pct") or -9999) if rows else None
+    worst = min(rows, key=lambda r: r.get("pct") or 9999) if rows else None
+
+    def _pos(r):
+        h, l = r.get("high52"), r.get("low52")
+        p = r.get("price")
+        if h and l and p and h > l:
+            cutoff = (p - l) / (h - l) * 100
+            band = "高位(>80%)" if cutoff > 80 else ("中位(40-80%)" if cutoff > 40 else "低位(<40%)")
+            return f"{band}，52周区间 {l:.2f}-{h:.2f}，现价处于区间 {cutoff:.0f}%"
+        return "52周极值未取到"
+
+    lines = [f"# 每日舆情雷达（{date_str}）", "",
+             f"> 观察池 {len(rows)} 只：上涨 {len(up)}，下跌 {len(down)}；平均 {avg:+.2f}%。"
+             f"最强 {best['name']}({fmt(best.get('pct'), '%')})，最弱 {worst['name']}({fmt(worst.get('pct'), '%')})。"
+             f"北向逐日净流向 2024-08 起停发，资金面以主力/大盘定性。", "", "## 二、个股明细", ""]
     for r in rows:
-        lines.append(f"## {r['name']}（{r['code']}）")
+        lines.append(f"### {r['name']}（{r['code']}）")
+        vol = r.get("volume"); amt = r.get("amount"); amp = r.get("amplitude")
+        vol_s = f"{int(vol):,}手" if vol is not None else "N/A"
+        amt_s = f"{amt/10000:.2f}亿" if amt is not None else "N/A"
         lines.append(f"- **量价异动**：现价 {fmt(r['price'])} 元，当日 {fmt(r['pct'], '%')}，"
-                     f"量比 {fmt(r['volume_ratio'], '', 1)}（vs 近5日均量），换手 {fmt(r['turnover'], '%')}；"
-                     f"主力净流入 {fmt(r.get('main_net'), '亿')}（占比 {fmt(r.get('main_pct'), '%')}）。")
-        lines.append(f"- **估值**：动态 PE {fmt(r['pe'])}，PB {fmt(r['pb'])}，总市值 {fmt(r['mktcap'], '亿')}。")
+                     f"量比 {fmt(r['volume_ratio'], '', 1)}（vs 近5日均量），换手 {fmt(r['turnover'], '%')}，"
+                     f"振幅 {fmt(amp, '%')}；今开 {fmt(r.get('open'))}，高/低 {fmt(r.get('high'))}/{fmt(r.get('low'))}；"
+                     f"成交量 {vol_s}，成交额 {amt_s}。")
+        lines.append(f"- **资金面**：主力净流入 {fmt(r.get('main_net'), '亿')}（占比 {fmt(r.get('main_pct'), '%')}）；"
+                     f"腾讯源暂不提供主力资金，akshare 可用时补齐。")
+        lines.append(f"- **估值与位置**：动态 PE {fmt(r['pe'])}，PB {fmt(r['pb'])}，"
+                     f"总市值 {fmt(r['mktcap'], '亿')}（流通 {fmt(r.get('circ_mktcap'), '亿')}）；{_pos(r)}。")
+        fund = r.get("fund")
+        if fund:
+            lines.append(f"- **基本面(近一期)**：{fund['report_date']} 营收 {_fnum(fund['revenue'])}"
+                         f"（增速 {_pct(fund['rev_growth'])}），归母 {_fnum(fund['net_profit'])}"
+                         f"（增速 {_pct(fund['profit_growth'])}），ROE {_pct(fund['roe'])}，"
+                         f"毛利率 {_pct(fund['gross_margin'])}，EPS {_fnum(fund['eps'])}，BPS {_fnum(fund['bps'])}。")
+        else:
+            lines.append("- **基本面**：未取到财务数据。")
         news = r.get("news") or []
         if news:
             lines.append("- **公告速递/要点**：")
@@ -259,9 +423,22 @@ def daily_radar(rows: list[dict], date_str: str) -> str:
                 lines.append(f"  - [{n['kind']}] {n['title']} — {n['url']}")
         else:
             lines.append("- 公告速递：今日暂无（或该源未返回）。")
-        lines.append("- **行业催化剂**：见当日板块复盘；海外映射请关注英伟达/特斯拉等隔夜表现。")
+        lines.append("- **行业催化/海外映射**：关注板块政策与英伟达/特斯拉隔夜表现（详见每周板块复盘）。")
         lines.append("- **卖方覆盖**：当日未自动获取券商评级，需人工核验或补配研报源。")
         lines.append("")
+    lines += ["## 三、组合综合点评（投资专家）", ""]
+    brief = "；".join(f"{r['name']} {fmt(r.get('pct'), '%')} PE{fmt(r.get('pe'), '')}" for r in rows)
+    prompt = ("你是首席投资舆情分析师兼资深基金经理。基于下列 10 只科技股今日表现（名称 涨跌幅 PE），"
+              "用概率思维给出今日组合的整体主线、主要风险、以及持有者(止盈/止损/减仓)与持币者(是否进入击球区)的操作思路，"
+              "禁止绝对化。股票：\n" + brief)
+    comment = reporting._llm(prompt) if hasattr(reporting, "_llm") else None
+    if comment:
+        lines.append(comment)
+    else:
+        lines.append("未配置 DeepSeek key，以下为规则化要点：")
+        lines.append(f"- 今日组合平均 {avg:+.2f}%：最强 {best['name']}（{fmt(best.get('pct'), '%')}），"
+                     f"最弱 {worst['name']}（{fmt(worst.get('pct'), '%')}）。建议结合个股公告与量价分批跟踪，控制仓位（≤10%）。")
+    lines.append("")
     lines.append("---")
     lines.append(DISCLAIMER)
     return "\n".join(lines)
@@ -304,31 +481,34 @@ def biweekly_memo(rows: list[dict], date_str: str) -> str:
 def weekly_review(date_str: str) -> str:
     sectors = fetch_sectors(demo=demo_flag if "demo_flag" in globals() else False)
     rows = "\n".join(f"- **{s['name']}**：{fmt(s['pct'], '%')}" for s in sectors)
-    lines = [f"# 本周A股热点板块归因复盘（{date_str}）", "", "## 本周 Top3 强势板块", rows, ""]
-    lines.append("## 核心驱动归因")
-    lines.append("归因：需区分「政策主题炒作 / 基本面拐点估值修复 / 资金避险」。若涨幅高但成交未同步放大，多为资金行为；"
+    watch = "、".join(f"{s['name']}({s['code']})" for s in WATCHLIST)
+    top3 = "、".join(f"{s['name']}({fmt(s['pct'], '%')})" for s in sectors)
+    lines = [f"# 本周A股热点板块归因复盘（{date_str}）", "",
+             "> 数据口径：以所跟踪板块 ETF 当日涨跌代理板块强度（东财行业接口可达时优先）。", "",
+             "## 本周 Top3 强势板块", rows, "", "## 核心驱动归因"]
+    lines.append("需区分「政策主题炒作 / 基本面拐点估值修复 / 资金避险」。若涨幅高但成交未同步放大，多为资金行为；"
                  "若伴随业绩/订单落地，则偏向基本面修复。")
     lines.append("")
     lines.append("## 联动与抽血效应")
-    lines.append("热点板块若持续吸金，观察池中科技成长股存在流动性「抽血」风险；若属同一 AI/机器人主线则呈「共振」。"
-                 "以主力资金净流入方向判断。")
+    lines.append("热点板块若持续吸金，观察池科技成长股存在流动性「抽血」风险；若属同一 AI/机器人主线则呈「共振」。")
     lines.append("")
     lines.append("## 下周前瞻")
     lines.append("关注美联储议息、国内经济数据（PMI/社融/CPI）与产业政策（大基金/以旧换新/集采调整）。")
     lines.append("")
-    lines.append(llm_or_template(
-        "结合本周板块主线与观察池科技股，用概率思维提示下周最大系统性风险与机会。",
-        "下周最大风险：宏观流动性收紧或海外科技映射走弱；机会：AI 算力/机器人主线的估值修复。",
-    ))
+    prompt = ('你是首席投资舆情分析师兼资深基金经理。基于下列【给定事实】做定性研判：\n'
+              '本周 Top3 强势板块：' + top3 + '\n观察池（10 只）：' + watch + '\n'
+              '请用概率思维给出：1) 这三个板块走强最可能的主因与持续性；2) 对观察池科技股的联动或抽血判断；'
+              '3) 下周对观察池影响最大的系统性风险与机会。'
+              '严格只基于给定事实与产业常识推理，禁止编造任何数字、日期、来源、个股涨跌幅或不在给定列表中的公司；'
+              '不确定就写“需验证”。禁止绝对化。')
+    lines.append(llm_or_template(prompt,
+        "下周最大风险：宏观流动性收紧或海外科技映射走弱；机会：AI 算力/机器人主线的估值修复。"))
     lines.append("")
     lines.append("---")
     lines.append(DISCLAIMER)
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------- #
-# 样例数据（离线可跑）
-# --------------------------------------------------------------------------- #
 def demo_quotes() -> list[dict]:
     base = {
         "300308": (128.5, 3.2, 1.6, 4.1, 45.2, 8.3, 1450),
@@ -430,6 +610,7 @@ def main() -> None:
         rows = fetch_quotes(demo=demo_flag)
         save_snapshot(rows, date_str)
         if args.job == "daily":
+            augment_rows(rows)
             write_report(f"每日舆情雷达_{date_str}", daily_radar(rows, date_str))
         else:
             write_report(f"双周投研备忘录_{date_str}", biweekly_memo(rows, date_str))
