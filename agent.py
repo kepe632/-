@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import reporting
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
@@ -382,11 +383,19 @@ def save_snapshot(rows: list[dict], date_str: str) -> None:
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def write_report(name: str, content: str) -> Path:
-    path = REPORT_DIR / f"{name}.md"
-    path.write_text(content, encoding="utf-8")
-    print(f"已生成: {path}")
-    return path
+def write_report(name: str, content: str, date=None) -> Path:
+    date = date or dt.date.today()
+    folder = reporting.dated_dir(REPORT_DIR, date)
+    md = folder / f"{name}.md"
+    md.write_text(content, encoding="utf-8")
+    docx = folder / f"{name}.docx"
+    try:
+        reporting.md_to_docx(content, docx, title=name)
+    except Exception as e:
+        print(f"[warn] Word 生成失败({e})，仅保留 Markdown。")
+    print(f"已生成: {md}")
+    print(f"已生成: {docx}")
+    return docx
 
 
 def selftest() -> None:
@@ -403,7 +412,7 @@ def selftest() -> None:
 def main() -> None:
     global demo_flag
     p = argparse.ArgumentParser(description="中国科技长期主义 A股观察池投研 Agent")
-    p.add_argument("job", choices=["daily", "biweekly", "weekly", "selftest"])
+    p.add_argument("job", choices=["daily", "biweekly", "weekly", "morning", "selftest"])
     p.add_argument("--demo", action="store_true", help="离线样例模式")
     args = p.parse_args()
     demo_flag = args.demo
@@ -411,6 +420,10 @@ def main() -> None:
 
     if args.job == "selftest":
         selftest()
+        return
+
+    if args.job == "morning":
+        reporting.morning_report(dt.date.today())
         return
 
     if args.job in ("daily", "biweekly"):
