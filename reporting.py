@@ -154,52 +154,8 @@ def categorize(item):
 
 # ------------------------------ Word 导出 ------------------------------ #
 def md_to_docx(md_text, path, title):
-    from docx import Document
-
-    doc = Document()
-    doc.add_heading(title, level=0)
-    lines = md_text.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i].rstrip()
-        if not line.strip():
-            i += 1
-            continue
-        if line.startswith("|") and "|" in line:
-            rows = []
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                raw = lines[i].strip().strip("|")
-                cells = [c.strip() for c in raw.split("|")]
-                if not all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
-                    rows.append(cells)
-                i += 1
-            if rows:
-                table = doc.add_table(rows=0, cols=max(len(r) for r in rows))
-                table.style = "Table Grid"
-                for r in rows:
-                    tcell = table.add_row().cells
-                    for j, c in enumerate(r[: len(tcell)]):
-                        tcell[j].text = c
-            continue
-        if line.startswith("# "):
-            doc.add_heading(line[2:], level=1)
-        elif line.startswith("## "):
-            doc.add_heading(line[3:], level=2)
-        elif line.startswith("### "):
-            doc.add_heading(line[4:], level=3)
-        elif line.startswith(">"):
-            p = doc.add_paragraph(line.lstrip("> ").strip())
-            p.italic = True
-        elif line.startswith("- ") or line.startswith("* "):
-            doc.add_paragraph(line[2:], style="List Bullet")
-        else:
-            doc.add_paragraph(line)
-        i += 1
-    doc.save(str(path))
-
-
-def md_to_docx_heading_only(md_text, path, title):
-    md_to_docx(md_text, path, title)
+    import docxfmt
+    docxfmt.build_docx(md_text, path, title)
 
 
 # ------------------------------ 早间报告 ------------------------------ #
