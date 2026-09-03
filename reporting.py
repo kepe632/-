@@ -2,6 +2,8 @@
 """报告输出增强：按日期+星期建文件夹、Word(docx) 导出、每日早间市场与行业要闻。"""
 from __future__ import annotations
 import os
+import socket
+socket.setdefaulttimeout(15)
 
 import datetime as dt
 import re
@@ -287,9 +289,21 @@ def plot_sector_bar(sectors, out_png):
 
 def morning_report(date: dt.date):
     folder = dated_dir(REPORTS_ROOT, date)
-    cn = fetch_indices([c for _, c in INDEX_CN])
-    gl = fetch_indices([c for _, c in INDEX_GLOBAL])
-    news = fetch_global_news(window_hours=36)
+    try:
+        cn = fetch_indices([c for _, c in INDEX_CN])
+    except Exception:
+        cn = {}
+    try:
+        gl = fetch_indices([c for _, c in INDEX_GLOBAL])
+    except Exception:
+        gl = {}
+    try:
+        news = fetch_global_news(window_hours=36)
+    except Exception as e:
+        print(f"[warn] 全球新闻获取失败({e})")
+        news = []
+    if not news:
+        print("[warn] 今日暂无新闻源返回，报告仍将生成（请人工核验）。")
     buckets = {"国际市场": [], "中国市场": [], "行业产业": [], "个股/公司公告": [], "市场要闻": []}
     for it in news:
         buckets.setdefault(categorize(it), []).append(it)
@@ -323,7 +337,10 @@ def morning_report(date: dt.date):
     md_path = folder / f"{name}.md"
     md_path.write_text(text, encoding="utf-8")
     docx_path = folder / f"{name}.docx"
-    md_to_docx(text, docx_path, title=name)
+    try:
+        md_to_docx(text, docx_path, title=name)
+    except Exception as e:
+        print(f"[warn] Word 生成失败({e})，已保留 Markdown。")
     print(f"已生成: {md_path}")
     print(f"已生成: {docx_path}")
     return docx_path

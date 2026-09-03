@@ -18,7 +18,9 @@ import argparse
 import datetime as dt
 import json
 import os
+import socket
 import re
+socket.setdefaulttimeout(15)
 from pathlib import Path
 import reporting
 
@@ -662,6 +664,17 @@ def selftest() -> None:
     print("selftest OK: 三类报告均含合规声明。")
 
 
+
+def log_run(job: str, ok: bool, note: str = "", path: str = "") -> None:
+    """把每次运行追加到 data/run.log，便于排查定时任务是否执行及结果。"""
+    try:
+        log = Path(__file__).resolve().parent / "data" / "run.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"{dt.datetime.now().isoformat()} [{job}] {'OK' if ok else 'FAIL'} {note} {path}\n")
+    except Exception:
+        pass
+
 def main() -> None:
     global demo_flag
     p = argparse.ArgumentParser(description="中国科技长期主义 A股观察池投研 Agent")
@@ -675,20 +688,26 @@ def main() -> None:
         selftest()
         return
 
-    if args.job == "morning":
-        reporting.morning_report(dt.date.today())
-        return
-
-    if args.job in ("daily", "biweekly"):
-        rows = fetch_quotes(demo=demo_flag)
-        save_snapshot(rows, date_str)
-        if args.job == "daily":
-            augment_rows(rows)
-            write_report(f"每日舆情雷达_{date_str}", daily_radar(rows, date_str))
+    path = None
+    try:
+        if args.job == "morning":
+            path = reporting.morning_report(dt.date.today())
+        elif args.job in ("daily", "biweekly"):
+            rows = fetch_quotes(demo=demo_flag)
+            save_snapshot(rows, date_str)
+            if args.job == "daily":
+                augment_rows(rows)
+                path = write_report(f"每日舆情雷达_{date_str}", daily_radar(rows, date_str))
+            else:
+                path = write_report(f"双周投研备忘录_{date_str}", biweekly_memo(rows, date_str))
         else:
-            write_report(f"双周投研备忘录_{date_str}", biweekly_memo(rows, date_str))
-    else:
-        write_report(f"本周板块复盘_{date_str}", weekly_review(date_str))
+            path = write_report(f"本周板块复盘_{date_str}", weekly_review(date_str))
+        log_run(args.job, True, "generated", str(path) if path else "")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        log_run(args.job, False, str(e)[:160])
+        print(f"[error] {args.job} 运行失败: {e}")
 
 
 if __name__ == "__main__":
