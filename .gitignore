@@ -3,3 +3,5 @@ reports/
 .env
 __pycache__/
 *.pyc
+使用说明.md
+使用说明.docx

@@ -18,7 +18,7 @@
 ## 快速开始
 
 ```powershell
-# 1) 安装依赖（需联网，可走代理 127.0.0.1:7890）
+# 1) 安装依赖（需联网；如在国内可自行配置代理）
 pip install -r requirements.txt
 
 # 2) 离线跑通（不依赖 akshare / 网络）
