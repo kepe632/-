@@ -1,15 +1,17 @@
 ﻿# A股科技长期主义观察池 · 投研 Agent
 
-面向「中国科技长期主义」A 股观察池的定时投研工具，按 **事实(Fact)+逻辑(Logic)+预期(Expectation)** 产出可追溯报告。
+面向「中国科技长期主义」A 股观察池的投研工具，按 **事实(Fact)+逻辑(Logic)+预期(Expectation)** 产出可追溯报告。
 
-## 生成的报告（Word 版，按日期+星期归档）
+> 本版本**不含定时推送**：所有报告由你手动运行命令生成。完整用法见 [使用说明.md](使用说明.md)。
 
-| 任务 | 触发时刻 | 产物 |
+## 能生成的报告（Word 版，按日期+星期归档）
+
+| 命令 | 报告 | 内容 |
 |---|---|---|
-| 早间市场与行业要闻 | 每工作日 07:00 | 全球/中国主要指数 + 全球/中国/行业要闻分类 |
-| 每日舆情雷达 | 每工作日 20:00 | 量价异动 / 公告速递 / 行业催化剂 / 卖方覆盖 |
-| 双周投研备忘录 | 每月 1、16 日 20:00 | 消息面·技术面·估值水位·买卖建议 四维表格 |
-| 本周板块归因复盘 | 每周五 16:00 | Top3 板块 + 归因 + 抽血/共振 + 下周前瞻 |
+| `python agent.py morning` | 每日早间市场与行业要闻 | 全球/中国主要指数 + 全球/中国/行业要闻分类 + DeepSeek 专家解读 |
+| `python agent.py daily` | 每日舆情雷达 | 每只股：量价 + 主力资金 + 估值位置(52周分位) + 基本面 + 公告 + 组合点评 |
+| `python agent.py weekly` | 本周板块复盘 | 东财行业 Top10 + 涨跌幅条形图 + 概率化归因 + 下周前瞻 |
+| `python agent.py biweekly` | 双周投研备忘录 | 消息面·技术面·估值水位·买卖建议 四维表格 |
 
 每份报告末尾固定带合规声明。LLM 输出强制「概率思维、假设句式、禁止绝对化」。
 
@@ -23,7 +25,7 @@ pip install -r requirements.txt
 python agent.py selftest
 python agent.py daily --demo
 
-# 3) 实盘跑（需已装 akshare 且有网）
+# 3) 手动生成报告
 python agent.py morning
 python agent.py daily
 python agent.py biweekly
@@ -37,7 +39,7 @@ python agent.py weekly
 
 ## 接入 LLM（可选增强）
 
-未配置时报告输出数据驱动模板；配置后会自动补充「综合研判」：
+未配置时报告输出数据驱动模板；配置后会自动补充「专家解读 / 组合点评」：
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "sk-..."
@@ -45,24 +47,27 @@ $env:DEEPSEEK_BASE_URL = "https://api.deepseek.com"   # 默认值，可省
 $env:DEEPSEEK_MODEL = "deepseek-chat"
 ```
 
-## 定时调度（Windows 任务计划程序）
+或复制 `.env.example` 为 `.env` 填写（`.env` 已 gitignore）。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File install_scheduler.ps1
-```
+## 输出位置
 
-会注册 `AshareMorning`(工作日07:00)、`AshareDaily`(工作日20:00)、`AshareBiweekly1/16`(每月1/16日20:00)、`AshareWeeklyFri`(周五16:00)。
-若改用 Linux，可在 crontab 写入：`0 7 * * 1-5`、`0 20 * * 1-5`、`0 20 1,16 * *`、`0 16 * * 5`。
+所有报告生成在 `reports/<日期_星期>/` 子目录（如 `reports/2026-09-21_周一/`），
+同时输出 **.docx(Word)** 与 **.md**。
+
+## 数据来源
+
+- 行情：腾讯行情 `qt.gtimg.cn`
+- 主力资金 / 52周极值 / 行业板块：东方财富 `push2delay.eastmoney.com`
+- 财务数据：东方财富 `datacenter.eastmoney.com`
+- 新闻：东方财富 / 财联社 / 新浪
+- 专家解读：DeepSeek
 
 ## 几点说明（刻意从简）
 
-- **记忆层**用本地 `data/*.json` 逐日快照，双周任务直接读近 14 天文件召回。若日后需要**语义检索**再升级为向量库，
-  当前场景用文件读取就够。 `ponytail: 文件记忆；若需跨时间语义召回再上 chromadb/sentence-transformers。`
+- **记忆层**用本地 `data/*.json` 逐日快照，双周任务直接读近 14 天文件召回。若日后需要**语义检索**再升级为向量库。
 - **北向逐日净流向**自 2024-08 起不再实时披露，脚本以**主力净流入**作代理并明确标注。
 - **卖方覆盖**未自动抓券商研报库，仅按新闻关键词粗分类；严谨起见建议人工核验或补数据源。
-- **估值分位**当前用 PE 阈值近似，真实近 3 年分位需拉序列，接口做好后替换 `biweekly_memo` 中的 `band`。
-- **行情兜底**：akshare 取东财实时行情优先；若 egress 被限制则自动切换腾讯行情 qt.gtimg.cn（--noproxy 直连）。腾讯源不含量比与主力净流入，这两项显示 N/A；在本机正常终端里 akshare 可补齐。
-
-- **输出落盘**：所有报告生成在 `reports/<日期_星期>/` 子文件夹，同时输出 **.docx(Word)** 与 `.md`；早间 07:00 为市场/行业要闻，晚间 20:00 为个股舆情报告。
+- **估值分位**用 52 周区间近似。
+- **定时推送已移除**：Windows 计划任务已删除，`install_scheduler.ps1` 不再包含在仓库。
 
 > 本内容基于公开信息整理，不构成任何投资建议，股市有风险，入市需谨慎。
